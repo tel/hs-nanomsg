@@ -1,0 +1,220 @@
+
+* Questions
+  - What does "invalid" mean when EBADF is thrown?
+  - What happens when we nn_getsockopt NN_SUB_SUBSCRIBE or
+    NN_SUB_UNSUBSCRIBE?
+  - What are the desired Haskell blocking semantics? Consider
+    `trySendNonblocking` and what to do about timeouts.
+  - How do we handle Errno's on Windows? Nanomsg may redefine them
+    randomly, so we should always use Nanomsg's sub-error-system.
+    - Nanomsg suggests that `nn_symbol()` is used to gather these as
+      it's canonical and allows the dynamically linked library to
+      change without invalidating the library. I'm not so sure that'll
+      work with Haskell...
+* Errors and Recovery
+  As Nanomsg is an asynchronous, highly-effectful library we're going
+  to want to use real, capital E, Exceptions. This requires careful
+  thought as a major design goal is to minimize the error surface
+  error through types.
+** Notes
+   - "The remaining cases are failures that are specific to a
+     subsystem, and that cannot be avoided by correct use of the API.
+     Use checked exceptions for these."
+     [https://weblogs.java.net/blog/carcassi/archive/2009/09/25/simple-guide-checked-exceptions]
+     - "If you are catching a checked exception, and you do not know
+       what you should do with it yet, wrap it in an
+       UnsupportedFailureException."
+   - NN_SNDFD/NN_RCVFD (see nn_getsockopt) can be used in conjunction
+     with polling to make everything snappier
+     - How do we handle real file handles in a x-platform manner? (A:
+       System.Posix.Types.Fd)
+   - The whole library is designed to prevent accidental dependencies
+     between scalability methods---can we maintain that?
+   - Can we specify which sockets are unidirectional? Given them
+     statically typed "capabilities"?
+   - NN_VERSION should be grabbed using nn_symbol() as well.
+   - nn_recv() writes to a preallocated buffer... which is weird with
+     sizing. This can be fixed by using...
+
+     "Alternatively, nanomsg can allocate the buffer for you. To do
+     so, let the buf parameter be a pointer to a void* variable
+     (pointer to pointer) to the receive buffer and set the len
+     parameter to NN_MSG. If the call is successful the user is
+     responsible for deallocating the message using the nn_freemsg(3)
+     function."
+
+   - Zerocopy. This is theoretically a complicated problem, but since
+     Haskell's ByteStrings are pinned, it might be possible to support
+     it.
+
+     "If you still want to provide zero-copy, make sure to discuss it
+     on the nanomsg mailing list or IRC channel in advance to avoid
+     possible pitfalls."
+
+   - It's important to remember that nn_close() *blocks*
+   - The right way to handle EINTR is dependent on the specifics of
+     signal handling as implemented by the language runtime. The
+     general idea is to let the error bubble up the stack up to the
+     level that sets the signal handlers (in most cases it's the
+     language runtime). Following rule of thumb should work reasonably
+     well:
+     - In a plug-in binding, pass the EINTR error to the caller.
+     - In a binding written in native language, handle the EINTR error
+       by re-starting the interrupted function.
+** Error listing
+   - T :: Prevented by types
+   - R :: Resource limit
+   - U :: Unrecoverable
+   - ? :: Questions to be answered
+*** nn_socket
+    - [T] EAFNOSUPPORT :: Specified address family is not supported.
+    - [T] EINVAL :: Unknown protocol.
+    - [R] EMFILE :: The limit on the total number of open SP sockets
+                    or OS limit for file descriptors has been reached.
+    - [U] ETERM :: The library is terminating.
+*** nn_close
+    - [?] EBADF :: The provided socket is invalid.
+
+               What does invalid mean here? Is this something that can
+               be statically prevented?
+    - EINTR :: Operation was interrupted by a signal. The socket is
+               not fully closed yet. Operation can be re-started by
+               calling nn_close() again.
+
+               This absolutely must be caught by the user. It's an
+               asynchronous exception that requires meaningful
+               response.
+*** nn_setsockopt
+    - [?] EBADF :: The provided socket is invalid.
+    - [T] ENOPROTOOPT :: The option is unknown at the level indicated.
+    - [T] EINVAL :: The specified option value is invalid.
+    - [U] ETERM :: The library is terminating.
+*** nn_getsockopt
+    - [?] EBADF :: The provided socket is invalid.
+    - [T] ENOPROTOOPT :: The option is unknown at the level indicated.
+    - [U] ETERM :: The library is terminating.
+*** nn_bind
+    - [?] EBADF :: The provided socket is invalid.
+    - [R] EMFILE :: Maximum number of active endpoints was reached.
+    - [T?] EINVAL :: The syntax of the supplied address is invalid.
+
+                     This could be a user error---perhaps it'd be
+                     better thrown as a `Maybe`? Or eliminated by
+                     using types? For instance, the network-ip
+                     package?
+    - [T?] ENAMETOOLONG :: The supplied address is too long.
+         
+         This could be a user error---perhaps it'd be better thrown as
+         a `Maybe`? Or eliminated by using types?  For instance, the
+         network-ip package?
+
+    - [T] EPROTONOSUPPORT :: The requested transport protocol is not
+         supported.
+    - [?] EADDRNOTAVAIL :: The requested endpoint is not local.
+         
+         How can this error arise? Someone would have to accidentally
+         provide a non-local address on the inproc:// or ipc://
+         schemes.
+    - [T/] ENODEV :: Address specifies a nonexistent interface.
+                
+                     Partially solvable by types (only allowing valid
+                     interface types), but it also could be that the
+                     IP fails to resolve.
+    - EADDRINUSE :: The requested local endpoint is already in use.
+                    
+                    This and not available just suggests that bind
+                    should be an Either/Maybe function... tryBind, for
+                    instance. They're both synchronous.
+    - [U] ETERM :: The library is terminating.
+*** nn_connect
+    - [?] EBADF :: The provided socket is invalid.
+                   
+                   Same as usual.
+    - [R] EMFILE :: Maximum number of active endpoints was reached.
+    - [T] EINVAL :: The syntax of the supplied address is invalid.
+    - [T?] ENAMETOOLONG :: The supplied address is too long.
+    - [T] EPROTONOSUPPORT :: The requested transport protocol is not
+         supported.
+    - [T/] ENODEV :: Address specifies a nonexistent interface.
+    - [U] ETERM :: The library is terminating.
+*** nn_shutdown
+    - [?] EBADF :: The provided socket is invalid.
+    - [T] EINVAL :: The how parameter doesn’t correspond to an active
+                    endpoint.
+
+                    To prevent this by types we can do two
+                    things---One, prevent anyone from forming
+                    `Endpoints` without binding. Two, returning
+                    synchronously like `tryShutdown :: s -> Endpoint
+                    -> Bool`.
+    - EINTR :: Operation was interrupted by a signal. The endpoint is
+               not fully closed yet. Operation can be re-started by
+               calling nn_shutdown() again.
+
+               Again, this absolutely must be caught by the user. This
+               is exactly what asynchronous exceptions are for.
+    - [U] ETERM :: The library is terminating.
+*** nn_send
+    - [?] EBADF :: The provided socket is invalid.
+    - [T?] ENOTSUP :: The operation is not supported by this socket type.
+                      
+                      Is it possible to stop this via types? This
+                      begins to suggest that every SocketType should
+                      be it's own type and thus be a part of a
+                      different class if it makes sense.
+    - [T] EFSM :: The operation cannot be performed on this socket at the
+                  moment because the socket is not in the appropriate
+                  state. This error may occur with socket types that
+                  switch between several states.
+                  
+                  Again, this should just be done via a `trySend`
+                  interface. Or, even, an indexed monad?
+    - "Not all sent" :: What happens when the returned size does not
+                        match the input size.
+
+                        Another place for `trySend`?
+    - [?] EAGAIN :: Non-blocking mode was requested and the message
+                    cannot be sent at the moment.
+                    
+                    ???
+                    
+                    Should this be a `trySend` interface as well? Or,
+                    perhaps, `trySendNonblocking`.
+    - EINTR :: The operation was interrupted by delivery of a signal
+               before the message was sent.
+    - [?] ETIMEDOUT :: Individual socket types may define their own
+                       specific timeouts. If such timeout is hit, this
+                       error will be returned.
+
+                       This depends entirely upon the Haskell
+                       semantics. What happens
+    - [U] ETERM :: The library is terminating.
+*** nn_recv
+    - [?] EBADF :: The provided socket is invalid.
+    - [T?] ENOTSUP :: The operation is not supported by this socket type.
+    - [T?] EFSM :: The operation cannot be performed on this socket at
+                   the moment because socket is not in the appropriate
+                   state. This error may occur with socket types that
+                   switch between several states.
+    - [T] EAGAIN :: Non-blocking mode was requested and there’s no message
+                    to receive at the moment.
+                    
+                    `peekRecv` for instance
+    - EINTR :: The operation was interrupted by delivery of a signal
+               before the message was received.
+    - ETIMEDOUT :: Individual socket types may define their own
+                   specific timeouts. If such timeout is hit this
+                   error will be returned.
+    - ETERM :: The library is terminating.
+*** nn_errno
+*** nn_strerror
+*** nn_device
+    - EBADF :: One of the provided sockets is invalid.
+    - EINVAL :: Either one of the socket is not an AF_SP_RAW socket;
+                or the two sockets don’t belong to the same protocol;
+                or the directionality of the sockets doesn’t fit
+                (e.g. attempt to join two SINK sockets to form a
+                device).
+    - EINTR :: The operation was interrupted by delivery of a signal.
+    - ETERM :: The library is terminating.
+*** nn_term
