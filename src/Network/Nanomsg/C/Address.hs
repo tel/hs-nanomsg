@@ -1,111 +1,173 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings,
+             StandaloneDeriving,
+             GADTs #-}
 
-module Network.Nanomsg.C.Address where
+-- Copyright 2013 Joseph Tel Abrahamson
+--
+-- Licensed under the Apache License, Version 2.0 (the "License"); you
+-- may not use this file except in compliance with the License. You
+-- may obtain a copy of the License at
+-- 
+--   http://www.apache.org/licenses/LICENSE-2.0
+--
+-- Unless required by applicable law or agreed to in writing, software
+-- distributed under the License is distributed on an "AS IS" BASIS,
+-- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-- implied. See the License for the specific language governing
+-- permissions and limitations under the License.
 
-import Prelude hiding (print)
+{-|
+
+Typesafe addresses. This is the basis for an 'IsString' instance for
+addresses.
+
+# TCP
+
+## bind
+
+tcp://*:8000
+tcp://192.168.0.111:8000
+  - address might be invalid: "Can't assign requested address [49] (src/transports/tcp/btcp.c:372)"
+tcp://::1:8000
+tcp://eth0:8000
+
+tcp://[*]:8000
+  - This one seems to not work: "(-1) 19: Operation not supported by device"
+    whereas without the brackets it works just fine
+tcp://[192.168.0.111]:8000
+tcp://[::1]:8000
+tcp://[eth0]:8000
+
+## connect
+
+tcp://192.168.0.111;192.168.0.111:8000
+tcp://192.168.0.111;::1:8000
+tcp://192.168.0.111;google.com:8000
+tcp://::1;192.168.0.111:8000
+tcp://::1;::1:8000
+tcp://::1;google.com:8000
+tcp://eth0;192.168.0.111:8000
+tcp://eth0;::1:8000
+tcp://eth0;google.com:8000
+
+tcp://[192.168.0.111];192.168.0.111:8000
+tcp://[192.168.0.111];::1:8000
+tcp://[192.168.0.111];google.com:8000
+tcp://[::1];192.168.0.111:8000
+tcp://[::1];::1:8000
+tcp://[::1];google.com:8000
+tcp://[eth0];192.168.0.111:8000
+tcp://[eth0];::1:8000
+tcp://[eth0];google.com:8000
+
+tcp://192.168.0.111:8000
+tcp://::1:8000
+tcp://google.com:8000
+
+-}
+
+module Network.Nanomsg.C.Address (
+  Bind, Connect,
+  Interface (..), Port, TCPAddress (..),
+  TCP, Address (..),
+  freshInprocAddress,
+  ser,
+  ) where
 
 import Foreign.C.Types (CInt)
 
-import Data.Monoid
-import Data.Textual
-import qualified Text.Printer as Pr
-import qualified Text.Printer.Numerals as Pr
-import qualified Text.Parser.Char as Pa
-import qualified Network.IP.Addr as IP
-
-import qualified Filesystem.Path.CurrentOS as P
-
+import qualified Network.IPAddress as IP
+import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString as S
-import           Data.ByteString (ByteString)
-import qualified Data.Text as T
-import           Data.Text (Text)
-
-
+import Data.ByteString (ByteString)
+import Data.Monoid ((<>))
+import System.Random
 import Network.Nanomsg.C.Syms
 
-sockAddrMax :: CInt
-sockAddrMax = getSym "NN_SOCKADDR_MAX"
 
-data Address ty where
-  Inproc :: Text          -> Address ty
-  IPC    :: P.FilePath    -> Address ty
-  -- ^ Note: this MUST be a valid (printable) 'P.FilePath' else it'll
-  -- cause weird runtime *printing* behavior. It must also have a
-  -- basename---a smart constructor ought to build a default basename
-  -- in.
-  TCP    :: TCPAddress ty -> Address ty
+-- | A locally organization typeclass for serialization to
+-- 'ByteString'. This can get more involved later if necessary. Not
+-- for export.
+class Serial a where
+  ser :: a -> ByteString
 
-instance Printable (Address ty) where
-  print (Inproc name) = Pr.text "inproc://" <> Pr.text name
-  print (IPC path)    = Pr.text "ipc://" <> Pr.text (P.encode path)
-  print (TCP addy)    = Pr.text "tcp://" <> print addy
+-- | Empty type for phantom tagging 'Address'es which can only be
+-- interpreted as local, binding addresses.
+data Bind
 
--- | 'Listen' type TCP addresses are ones that can only be used for
--- 'Nanomsg.Network.C.bind'.
-data Listen
+-- | Empty type for phantom tagging 'Address'es which can only be
+-- interpreted as remote, connecting addresses.
+data Connect
 
--- | Listen type TCP addresses are ones that can only be used for
--- 'Nanomsg.Network.C.bind'.
-data Broadcast
+-- | A local or remote 'Interface'. Some kinds of 'Interface' are
+-- polymorphic while others are only useful for binding or connecting
+-- alone.
+data Interface ty where
+  All   :: Interface Bind
+  Named :: ByteString -> Interface Bind
+  IPv4  :: IP.IPv4    -> Interface ty
+  IPv6  :: IP.IPv6    -> Interface ty  
+  DNS   :: ByteString -> Interface Connect
 
--- | A network interface on the local machine to target.
-data TCPInterfacePart ty where
-  StarI  ::               TCPInterfacePart Listen
-  -- ^ Wildcard interfaces, @tcp://*@ are only usable locally
-  IPv4I  :: IP.IP4 -> TCPInterfacePart ty
-  IPv6I  :: IP.IP6 -> TCPInterfacePart ty
-  NamedI :: Text   -> TCPInterfacePart ty
-  -- ^ Named interfaces are OS specific, but we cannot do much
-  -- checking. This is one great way to have an address failure: using
-  -- an undefined interface name.
+deriving instance Eq (Interface ty)
+deriving instance Show (Interface ty)
 
-instance Printable (TCPInterfacePart ty) where
-  print StarI      = Pr.text "*"
-  print (IPv4I ip) = print ip
-  print (IPv6I ip) = print ip
-  print (NamedI n) = Pr.text n
-
--- | A network address to reach out to, local or foreign.
-data TCPAddressPart ty where
-  IPv4A :: IP.IP4  -> TCPAddressPart ty
-  IPv6A :: IP.IP6  -> TCPAddressPart ty
-  DNSA  :: Text    -> TCPAddressPart Broadcast
-  -- ^ An address requiring a domain lookup.
-
-instance Printable (TCPAddressPart ty) where
-  print (IPv4A ip) = print ip
-  print (IPv6A ip) = print ip
-  print (DNSA n)   = Pr.text n
+instance Serial (Interface ty) where
+  ser All       = "*"
+  ser (Named s) = s
+  ser (IPv4 a)  = S8.pack $ IP.showAddress a
+  ser (IPv6 a)  = S8.pack $ IP.showAddress a
+  ser (DNS s)   = s
 
 type Port = Int
 
--- | A TCP-style network address
+instance Serial Port where
+  ser = S8.pack . show
+
+-- | 'Address'es reflect at the type level whether they're 'bind'able
 data TCPAddress ty where
-  Bind    :: TCPInterfacePart Listen
-             -> Maybe Port
-             -> TCPAddress Listen
-  Connect :: Maybe (TCPInterfacePart Broadcast)
-             -> TCPAddressPart Broadcast
-             -> Maybe Port
-             -> TCPAddress Broadcast
+  Local  :: Interface Bind
+            -> Port -> TCPAddress Bind
+  Remote :: Maybe (Interface Connect) -> Interface Connect
+            -> Port -> TCPAddress Connect
 
-prMayport Nothing  = Pr.text T.empty
-prMayport (Just p) = Pr.text ":" <> Pr.nnDecimal p
+deriving instance Eq (TCPAddress ty)
+deriving instance Show (TCPAddress ty)
 
-instance Printable (TCPAddress ty) where
-  print (Bind int mayport)                = Pr.char '[' <> print int  <> Pr.char ']' <> prMayport mayport
-  print (Connect Nothing    addy mayport) = Pr.char '[' <> print addy <> Pr.char ']' <> prMayport mayport
-  print (Connect (Just int) addy mayport) =
-       Pr.char '[' <> print int  <> Pr.char ']' <> Pr.char ';'
-    <> Pr.char '[' <> print addy <> Pr.char ']' <> prMayport mayport
+instance Serial (TCPAddress ty) where
+  ser (Local int port)             =
+    ser int <> ":" <> ser port
+  ser (Remote Nothing tar port)    =
+    ser tar <> ":" <> ser port
+  ser (Remote (Just int) tar port) =
+    ser int <> ":" <> ser tar <> ":" <> ser port
+
+data Inproc
+data TCP
+data IPC
+
+data Address trans ty where
+  Inproc :: ByteString    -> Address Inproc ty
+  TCP    :: TCPAddress ty -> Address TCP ty
+  IPC    :: FilePath      -> Address IPC ty
+
+deriving instance Eq (Address trans ty)
+deriving instance Show (Address trans ty)
+
+-- | Generate a 20-byte random string to use as an inproc address.
+freshInprocAddress :: IO (Address Inproc ty)
+freshInprocAddress = fmap (Inproc . S.pack . take 30 . randoms) newStdGen 
+
+instance Serial FilePath where
+  ser = S8.pack
   
--- NN_SOCKADDR_MAX
--- parseAddress :: ByteString -> Parsed Address
--- parseAddress = undefined
+instance Serial (Address trans ty) where
+  ser (Inproc name) = "inproc://" <> name
+  ser (TCP addy)    = "tcp://"    <> ser addy
+  ser (IPC path)    = "ipc://"    <> ser path
 
--- toBS :: Address -> ByteString
--- toBS = undefined
+sockAddrMax :: CInt
+sockAddrMax = getSym "NN_SOCKADDR_MAX"
 
 -- | Attempt to build an inproc transport address. Can fail if longer
 -- than 'sockaddrMax' less the length of @"inproc://"@.
