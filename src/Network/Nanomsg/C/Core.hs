@@ -225,8 +225,8 @@ instance Show EndpointError where
     
 -- | Binds a a 'Socket' to an 'Address' and get an 'Endpoint'
 -- representing that binding.
-bind :: Address tr Bind -> Socket s p -> IO (Either EndpointError (Endpoint s))
-bind address socket = S.useAsCString (ser address) $ \cstr -> do
+bind :: Socket s p -> Address tr Bind -> IO (Either EndpointError (Endpoint s))
+bind socket address = S.useAsCString (ser address) $ \cstr -> do
     res <- nn_bind socket cstr
     rErrorHandler "bind" res (return . Right . (flip Endpoint $ ser address))
 
@@ -294,8 +294,8 @@ bind address socket = S.useAsCString (ser address) $ \cstr -> do
 
 -- | Binds a a 'Socket' to an 'Address' and get an 'Endpoint'
 -- representing that binding.
-connect :: Address tr Connect -> Socket s p -> IO (Either EndpointError (Endpoint s))
-connect address socket =
+connect :: Socket s p -> Address tr Connect -> IO (Either EndpointError (Endpoint s))
+connect socket address =
   S.useAsCString (ser address) $ \cstr -> do
     res <- nn_connect socket cstr
     rErrorHandler "connect" res (return . Right . (flip Endpoint $ ser address))
