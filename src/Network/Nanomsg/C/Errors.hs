@@ -34,7 +34,7 @@ module Network.Nanomsg.C.Errors (
   -- compatible. Nanomsg exports its own 'nnGetErrno' for
   -- compatibility.
   
-  Errno (..), errnoInt, nnGetErrno,
+  Errno (..), nnGetErrno,
   
   -- ** Error codes
 
