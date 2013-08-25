@@ -1,6 +1,6 @@
 
 nnHs --- Nanomsg for Haskell
-----------------------------
+============================
 
 This is a very early stage client for [Nanomsg](http://nanomsg.org/)
 in Haskell.  Please explore it and ask questions or submit suggestions
@@ -11,7 +11,7 @@ like input from anyone who has experience building such a thing.
 [See the wiki for more information.](https://github.com/tel/hs-nanomsg/wiki)
 
 Building
-========
+--------
 
 This library, `nanomsg`, is intended to be built and installed by
 Cabal. When it reaches the `1.0.0` release I will make it available on
@@ -22,12 +22,12 @@ installed at a reasonable place on your system. It makes no attempt to
 install that for you.
 
 Is it any good?
-===============
+---------------
 
 [Not yet.](https://news.ycombinator.com/item?id=3067434)
 
 Contributing
-============
+------------
 
 #### Commits
 
