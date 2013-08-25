@@ -23,7 +23,9 @@
 -- 
 -- TODO: Refactor some of the messy error handling code.
 
-{-# LANGUAGE GeneralizedNewtypeDeriving, RankNTypes #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving,
+             RankNTypes,
+             FlexibleInstances #-}
 module Network.Nanomsg.C.Core (
 
   -- * Basic API

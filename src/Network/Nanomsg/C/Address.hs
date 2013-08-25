@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings,
              StandaloneDeriving,
+             TypeSynonymInstances,
+             FlexibleInstances,
              GADTs #-}
 
 -- Copyright 2013 Joseph Tel Abrahamson
