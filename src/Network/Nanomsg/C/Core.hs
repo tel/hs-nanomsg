@@ -33,6 +33,7 @@ module Network.Nanomsg.C.Core (
   -- with these functions in a typesafe manner.
 
   Socket (..), Endpoint (..), new, bind, connect, shutdown,
+  EndpointError (..),
   
   -- Socket, Endpoint,
   -- newSocket, new, raw, close,
