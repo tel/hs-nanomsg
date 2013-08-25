@@ -20,6 +20,8 @@
 -- Maintainer  : me@jspha.com
 -- Stability   : experimental
 -- Portability : non-portable
+-- 
+-- TODO: Refactor some of the messy error handling code.
 
 {-# LANGUAGE GeneralizedNewtypeDeriving, RankNTypes #-}
 module Network.Nanomsg.C.Core (
@@ -30,7 +32,7 @@ module Network.Nanomsg.C.Core (
   -- majority of the types exported from this module are used to work
   -- with these functions in a typesafe manner.
 
-  Socket (..), Endpoint (..), new
+  Socket (..), Endpoint (..), new, bind, connect,
   
   -- Socket, Endpoint,
   -- newSocket, new, raw, close,
@@ -91,66 +93,78 @@ instance Eq (Endpoint s) where
 instance Show (Endpoint s) where
   show (Endpoint _ addy) = "Endpoint{" ++ S8.unpack addy ++ "}"
 
+-- | A generic error handler. Takes a list of error responses and a
+-- postprocessing function and turns nanomsg return values into
+-- something more meaningful.
+rErrorHandler
+  :: String -> CInt -> (CInt -> IO b) -> [(Errno, IO b)] -> IO b
+rErrorHandler name res end cases
+  | res < 0 = do
+    e <- nnGetErrno
+    case lookup e cases of
+      Nothing  ->
+        -- We're not handling that error, it must be "impossible"
+        error $ "Network.Nanomsg.C.Core." ++ name ++ " \"impossible\" error"
+      Just val -> val
+  | otherwise = end res
+
+-- | Upgrade @EMFILE@ to an 'IOError'.
+eMFile :: String -> IO a
+eMFile name = ioError $ IOError
+  { ioe_handle      = Nothing
+  , ioe_type        = ResourceExhausted
+  , ioe_location    = "Network.Nanomsg.C.Core." ++ name
+  , ioe_description = show eMFILE
+  , ioe_errno       = Just (errnoInt eMFILE)
+  , ioe_filename    = Nothing
+  }
+
+-- | Upgrade @ETERM@ to an 'IOError'.
+eTerm :: String -> IO a
+eTerm name = ioError $ IOError
+  { ioe_handle      = Nothing
+  , ioe_type        = IllegalOperation
+  , ioe_location    = "Network.Nanomsg.C.Core." ++ name
+  , ioe_description = show eTERM
+  , ioe_errno       = Just (errnoInt eTERM)
+  , ioe_filename    = Nothing
+  }
+
 -- | Runs a continuation giving it a fresh socket of the desired
 -- kind. Ensures that socket endpoints are local to a particular
 -- socket and that the socket is properly closed. Can throw exceptions
 -- when system-level problems are encountered.
 new :: Protocol p => Domain -> p -> (forall s. Socket s p -> IO r) -> IO r
-new domain protocol k = do
+new domain protocol k = do  
   sockInt <- nn_socket domain (proValue protocol)
-  case sockInt of
+  sock <- rErrorHandler "new" sockInt (return . Socket . Fd)
 
-    -- Socket creation failed.
-    --
-    -- The possible reasons for this failure are the following:
-    --
-    -- EAFNOSUPPORT "Specified address family is not supported."
-    -- Impossible --- types ensure that only valid families are used
-    -- 
-    -- EINVAL "Unknown protocol."  Impossible --- types ensure that
-    -- only valid families are used
-    -- 
-    -- EMFILE "The limit on the total number of open SP sockets or OS
-    -- limit for file descriptors has been reached." Major failure ---
-    -- there's no reasonable way for this local thread to handle this
-    -- error.
-    -- 
-    -- ETERM "The library is terminating." Major failure --- there's
-    -- no reasonable way for this local thread to handle this error.
-    --
-    -- So, all of the errors are either impossible or hair-on-fire
-    -- problematic, so we'll let these exceptions rise.
-    n | n < 0 -> do
-      errno <- nnGetErrno
-      case errno of
-        e | e == eMFILE ->
-          ioError $ IOError
-            { ioe_handle      = Nothing
-            , ioe_type        = ResourceExhausted
-            , ioe_location    = "Network.Nanomsg.C.Core.withNew"
-            , ioe_description = show e
-            , ioe_errno       = Just (errnoInt e)
-            , ioe_filename    = Nothing
-            }
-          | e == eTERM ->
-          ioError $ IOError
-            { ioe_handle      = Nothing
-            , ioe_type        = IllegalOperation
-            , ioe_location    = "Network.Nanomsg.C.Core.withNew"
-            , ioe_description = show e
-            , ioe_errno       = Just (errnoInt e)
-            , ioe_filename    = Nothing
-            }
-          | otherwise ->
-              error "Network.Nanomsg.C.Core.withNew \"impossible\" error"
+  -- Socket creation has failed.
+  --
+  -- The possible reasons for this failure are the following:
+  -- 
+  -- EINVAL "Unknown protocol."  Impossible --- types ensure that
+  -- only valid families are used
+  --
+  -- EAFNOSUPPORT "Specified address family is not supported."
+  -- Impossible --- types ensure that only valid families are used
 
-      | otherwise -> do
+    [ (eMFILE, eMFile "new")
 
-      let sock = Socket (Fd sockInt)
+      -- EMFILE "The limit on the total number of open SP sockets or
+      -- OS limit for file descriptors has been reached." Major
+      -- failure --- there's no reasonable way for this local thread
+      -- to handle this error.
 
-      -- | We'll ensure that the socket closes when its thread goes
-      -- out of context even if an exception is thrown.
-      k sock `finally` tryHardToClose sock
+    , (eTERM, eTerm "new")
+
+      -- ETERM "The library is terminating." Major failure --- there's
+      -- no reasonable way for this local thread to handle this error.
+      
+    ]
+
+  -- Then we'll finally run the continuation with the socket
+  k sock `finally` tryHardToClose sock
 
 -- | Tries hard to close a 'Socket'. This operation *blocks* like any
 -- 'Socket' @close@ operation, so it's possible it'll get interrupted
@@ -172,7 +186,7 @@ tryHardToClose s = do
     --
     -- EBADF "The provided socket is invalid." Should be impossible
     -- due to types.
-    -- 
+    --
     -- EINTR "Operation was interrupted by a signal. The socket is not
     -- fully closed yet. Operation can be re-started by calling
     -- nn_close() again."
@@ -211,39 +225,57 @@ instance Show EndpointError where
 -- | Binds a a 'Socket' to an 'Address' and get an 'Endpoint'
 -- representing that binding.
 bind :: Address tr Bind -> Socket s p -> IO (Either EndpointError (Endpoint s))
-bind address socket =
-  S.useAsCString (ser address) $ \cstr -> do
+bind address socket = S.useAsCString (ser address) $ \cstr -> do
     res <- nn_bind socket cstr
-    case res of
+    rErrorHandler "bind" res (return . Right . (flip Endpoint $ ser address))
 
-      -- Could not bind the address
-      --
-      -- This operation could fail for many reasons, ordered by how
-      -- likely they are to be handled in the runtime.
-      --
+    -- Address binding has failed
+    --
+    -- This operation could fail for many reasons, ordered by how
+    -- likely they are to be handled in the runtime.
+    --
+    -- EBADF "The provided socket is invalid." Impossible,
+    -- constrained by types.
+    -- 
+    -- EINVAL "The syntax of the supplied address is invalid."
+    -- Impossible, constrained by types once 'Address'es are
+    -- in-place.
+
+      [ (eNODEV, return $ Left NonexistentDevice)
+
       -- ENODEV "Address specifies a nonexistent interface."
       -- Absolutely a handleable runtime error.
-      --
+
+      , (eADDRINUSE, return $ Left AddressInUse)
+        
       -- EADDRINUSE "The requested local endpoint is already in use."
       -- Absolutely a handleable runtime error.
-      --
+
+      , (eNAMETOOLONG, return $ Left AddressTooLong)
+        
       -- ENAMETOOLONG "The supplied address is too long." Possible and
       -- only checkable at runtime (How early can we check it though?
       -- Can we have the ToString instance of 'Address' throw errors
       -- immediately?). We'll pass this back (for now).
       --
       -- TODO: Finish 'IsString' for 'Address'.
-      --
+
+      , (eADDRNOTAVAIL, return $ Left UnavailableInterface)
+        
       -- EADDRNOTAVAIL "The requested endpoint is not local."
       -- Restricted somewhat, but if the user tries to connect on an
       -- interface that doesn't exist then this will happen.
-      --
+
+      , (ePROTONOSUPPORT, return $ Left UnsupportedProtocol)
+        
       -- EPROTONOSUPPORT "The requested transport protocol is not
       -- supported." I'm uncertain why this error would occur. Can it
       -- be constrained by types?
       --
       -- TODO: Constrain EPROTONOSUPPORT with types.
-      --
+
+      , (eMFILE, eMFile "bind")
+        
       -- EMFILE "Maximum number of active endpoints was reached." It's
       -- *possible* that this could be handled in process. Unsure what
       -- to do about it, really. Right now it'll be considered an
@@ -251,45 +283,74 @@ bind address socket =
       --
       -- TODO: Describe reasons for and against exposing this error to
       -- the user.
-      --
+
+      , (eTERM, eTerm "bind")
+        
       -- ETERM "The library is terminating." Unsalvagable, we'll
       -- upgrade it to a Haskell 'IOException'.
-      --
-      -- EBADF "The provided socket is invalid." Impossible,
-      -- constrained by types.
-      -- 
-      -- EINVAL "The syntax of the supplied address is invalid."
-      -- Impossible, constrained by types once 'Address'es are
-      -- in-place.
-      --
 
-      r | r < 0 ->
-        case Errno r of
-          e | e == eNODEV          -> return (Left NonexistentDevice)
-            | e == eADDRINUSE      -> return (Left AddressInUse)
-            | e == eNAMETOOLONG    -> return (Left AddressTooLong)
-            | e == eADDRNOTAVAIL   -> return (Left UnavailableInterface)
-            | e == ePROTONOSUPPORT -> return (Left UnsupportedProtocol)
-            | e == eMFILE -> ioError $ IOError
-              { ioe_handle      = Nothing
-              , ioe_type        = ResourceExhausted
-              , ioe_location    = "Network.Nanomsg.C.Core.bind"
-              , ioe_description = show e
-              , ioe_errno       = Just (errnoInt e)
-              , ioe_filename    = Nothing
-              }
-            | e == eTERM -> ioError $ IOError
-              { ioe_handle      = Nothing
-              , ioe_type        = IllegalOperation
-              , ioe_location    = "Network.Nanomsg.C.Core.bind"
-              , ioe_description = show e
-              , ioe_errno       = Just (errnoInt e)
-              , ioe_filename    = Nothing
-              }
-            | otherwise ->
-              error "Network.Nanomsg.C.Core.bind \"impossible\" error"
+      ]
 
-        | otherwise -> return $ Right $ Endpoint r (ser address)
+-- | Binds a a 'Socket' to an 'Address' and get an 'Endpoint'
+-- representing that binding.
+connect :: Address tr Connect -> Socket s p -> IO (Either EndpointError (Endpoint s))
+connect address socket =
+  S.useAsCString (ser address) $ \cstr -> do
+    res <- nn_connect socket cstr
+    rErrorHandler "connect" res (return . Right . (flip Endpoint $ ser address))
+
+    -- Address binding has failed
+    --
+    -- This operation could fail for many reasons, ordered by how
+    -- likely they are to be handled in the runtime.
+    --
+    -- EBADF "The provided socket is invalid." Impossible,
+    -- constrained by types.
+    -- 
+    -- EINVAL "The syntax of the supplied address is invalid."
+    -- Impossible, constrained by types once 'Address'es are
+    -- in-place.
+
+      [ (eNODEV, return $ Left NonexistentDevice)
+
+      -- ENODEV "Address specifies a nonexistent interface."
+      -- Absolutely a handleable runtime error.
+
+      , (eNAMETOOLONG, return $ Left AddressTooLong)
+        
+      -- ENAMETOOLONG "The supplied address is too long." Possible and
+      -- only checkable at runtime (How early can we check it though?
+      -- Can we have the ToString instance of 'Address' throw errors
+      -- immediately?). We'll pass this back (for now).
+      --
+      -- TODO: Finish 'IsString' for 'Address'.
+
+      , (ePROTONOSUPPORT, return $ Left UnsupportedProtocol)
+        
+      -- EPROTONOSUPPORT "The requested transport protocol is not
+      -- supported." I'm uncertain why this error would occur. Can it
+      -- be constrained by types?
+      --
+      -- TODO: Constrain EPROTONOSUPPORT with types.
+
+      , (eMFILE, eMFile "bind")
+        
+      -- EMFILE "Maximum number of active endpoints was reached." It's
+      -- *possible* that this could be handled in process. Unsure what
+      -- to do about it, really. Right now it'll be considered an
+      -- IOError akin to running out of file handlers.
+      --
+      -- TODO: Describe reasons for and against exposing this error to
+      -- the user.
+
+      , (eTERM, eTerm "bind")
+        
+      -- ETERM "The library is terminating." Unsalvagable, we'll
+      -- upgrade it to a Haskell 'IOException'.
+
+      ]
+
+
 
 -- CCalls
 ---------
