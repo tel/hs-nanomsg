@@ -368,14 +368,17 @@ shutdown socket e@(Endpoint ep _) = do
     -- EBADF "The provided socket is invalid." Impossible, constrained
     -- by types.
     -- 
-    -- EINVAL "The syntax of the supplied address is invalid."  The
-    -- endpoint isn't active. This is partially constrained by the
-    -- types---endpoints cannot be shutdown on the wrong socket---so
-    -- we'll actually just ignore this error and render the high-level
-    -- call idempotent.
   
-    [ (eINTR, shutdown socket e)
+    [ (eINVAL, return ())
+      
+      -- EINVAL "The syntax of the supplied address is invalid."  The
+      -- endpoint isn't active. This is partially constrained by the
+      -- types---endpoints cannot be shutdown on the wrong socket---so
+      -- we'll actually just ignore this error and render the high-level
+      -- call idempotent.
 
+    , (eINTR, shutdown socket e)
+        
       -- EINTR "Operation was interrupted by a signal. The endpoint is
       -- not fully closed yet. Operation can be re-started by calling
       -- shutdown again." So, we do just that.
