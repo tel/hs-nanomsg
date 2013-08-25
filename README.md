@@ -1,12 +1,14 @@
 
-Nanomsg for Haskell
--------------------
+nnHs --- Nanomsg for Haskell
+----------------------------
 
-Please don't use this. It's an alpha client library for an alpha core
-library. Please explore it, though. I'm extremely interested in
-creating a simple Haskell interface to a simple messaging abstraction
-like Nanomsg. I'm planning on taking a lot of inspiration from
-[zeromq3-haskell](http://hackage.haskell.org/package/zeromq3-haskell).
+This is a very early stage client for [Nanomsg](http://nanomsg.org/)
+in Haskell.  Please explore it and ask questions or submit suggestions
+and code. I'm extremely interested in creating a simple Haskell
+interface to a simple messaging abstraction like Nanomsg and would
+like input from anyone who has experience building such a thing.
+
+[See the wiki for more information.](https://github.com/tel/hs-nanomsg/wiki)
 
 Building
 ========
@@ -18,6 +20,11 @@ Hackage.
 The library currently assumes you have `libnanomsg` and its headers
 installed at a reasonable place on your system. It makes no attempt to
 install that for you.
+
+Is it any good?
+===============
+
+[Not yet.](https://news.ycombinator.com/item?id=3067434)
 
 Contributing
 ============
