@@ -32,7 +32,7 @@ module Network.Nanomsg.C.Core (
   -- majority of the types exported from this module are used to work
   -- with these functions in a typesafe manner.
 
-  Socket (..), Endpoint (..), new, bind, connect,
+  Socket (..), Endpoint (..), new, bind, connect, shutdown,
   
   -- Socket, Endpoint,
   -- newSocket, new, raw, close,
@@ -333,7 +333,7 @@ connect address socket =
       --
       -- TODO: Constrain EPROTONOSUPPORT with types.
 
-      , (eMFILE, eMFile "bind")
+      , (eMFILE, eMFile "connect")
         
       -- EMFILE "Maximum number of active endpoints was reached." It's
       -- *possible* that this could be handled in process. Unsure what
@@ -343,13 +343,46 @@ connect address socket =
       -- TODO: Describe reasons for and against exposing this error to
       -- the user.
 
-      , (eTERM, eTerm "bind")
+      , (eTERM, eTerm "connect")
         
       -- ETERM "The library is terminating." Unsalvagable, we'll
       -- upgrade it to a Haskell 'IOException'.
 
       ]
 
+-- | Removes an 'Endpoint' from its 'Socket'. Remaining messages will
+-- be attempted until the linger time expires, so this is
+-- blocking. Idempotent.
+shutdown :: Socket s p -> Endpoint s -> IO ()
+shutdown socket e@(Endpoint ep _) = do
+  res <- nn_shutdown socket ep
+  rErrorHandler "shutdown" res (const $ return ())
+
+    -- Endpoint shutdown has failed
+    --
+    -- This operation could fail for any of the following reasons.
+    --
+    -- EBADF "The provided socket is invalid." Impossible, constrained
+    -- by types.
+    -- 
+    -- EINVAL "The syntax of the supplied address is invalid."  The
+    -- endpoint isn't active. This is partially constrained by the
+    -- types---endpoints cannot be shutdown on the wrong socket---so
+    -- we'll actually just ignore this error and render the high-level
+    -- call idempotent.
+  
+    [ (eINTR, shutdown socket e)
+
+      -- EINTR "Operation was interrupted by a signal. The endpoint is
+      -- not fully closed yet. Operation can be re-started by calling
+      -- shutdown again." So, we do just that.
+
+    , (eTERM, eTerm "shutdown")
+
+      -- ETERM "The library is terminating." Unrecoverable, so we'll
+      -- upgrade the error.
+
+    ]
 
 
 -- CCalls
