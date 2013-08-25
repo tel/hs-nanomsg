@@ -1,8 +1,3 @@
-{-# LANGUAGE OverloadedStrings,
-             StandaloneDeriving,
-             TypeSynonymInstances,
-             FlexibleInstances,
-             GADTs #-}
 
 -- Copyright 2013 Joseph Tel Abrahamson
 --
@@ -68,6 +63,11 @@ tcp://google.com:8000
 
 -}
 
+{-# LANGUAGE OverloadedStrings,
+             StandaloneDeriving,
+             TypeSynonymInstances,
+             FlexibleInstances,
+             GADTs #-}
 module Network.Nanomsg.C.Address (
   Bind, Connect,
   Interface (..), Port, TCPAddress (..),
@@ -78,7 +78,7 @@ module Network.Nanomsg.C.Address (
 
 import Foreign.C.Types (CInt)
 
-import qualified Network.IPAddress as IP
+import qualified Network.Addresses as IP
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString as S
 import Data.ByteString (ByteString)
@@ -86,12 +86,7 @@ import Data.Monoid ((<>))
 import System.Random
 import Network.Nanomsg.C.Syms
 
-
--- | A locally organization typeclass for serialization to
--- 'ByteString'. This can get more involved later if necessary. Not
--- for export.
-class Serial a where
-  ser :: a -> ByteString
+import Network.Nanomsg.Util
 
 -- | Empty type for phantom tagging 'Address'es which can only be
 -- interpreted as local, binding addresses.
@@ -107,8 +102,7 @@ data Connect
 data Interface ty where
   All   :: Interface Bind
   Named :: ByteString -> Interface Bind
-  IPv4  :: IP.IPv4    -> Interface ty
-  IPv6  :: IP.IPv6    -> Interface ty  
+  IP    :: IP.IP      -> Interface ty
   DNS   :: ByteString -> Interface Connect
 
 deriving instance Eq (Interface ty)
@@ -117,8 +111,7 @@ deriving instance Show (Interface ty)
 instance Serial (Interface ty) where
   ser All       = "*"
   ser (Named s) = s
-  ser (IPv4 a)  = S8.pack $ IP.showAddress a
-  ser (IPv6 a)  = S8.pack $ IP.showAddress a
+  ser (IP a)    = ser a
   ser (DNS s)   = s
 
 type Port = Int
